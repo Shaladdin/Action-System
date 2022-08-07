@@ -14,6 +14,7 @@
 #define ssPin D8
 MFRC522 Reader;
 String lastCard;
+unsigned long int lastReading;
 
 // Others
 #define buzzer D4
@@ -48,10 +49,10 @@ bool code(int in, int expected)
 String server;
 
 // Wifi
-// #define WIFI_SSID_ "Mas MHD"
-// #define WIFI_PASSWORD_ "Fahri_Ali-17082016"
-#define WIFI_SSID_ "Lab Komputer 2"
-#define WIFI_PASSWORD_ "mtsn4bisa"
+#define WIFI_SSID_ "Mas MHD"
+#define WIFI_PASSWORD_ "Fahri_Ali-17082016"
+// #define WIFI_SSID_ "Lab Komputer 2"
+// #define WIFI_PASSWORD_ "mtsn4bisa"
 
 String wifiSSID;
 String wifiPassword; // Password of your wifi network
@@ -64,16 +65,16 @@ String query(String key, T value) { return key + "=" + String(value); }
 class url
 {
 public:
-    String server;
+    String *server;
     String path;
     String querys = "";
     void addQuery(String query) { querys += "&" + query; }
     void clearQuery() { querys = ""; }
     String get()
     {
-        return server + path + (querys == "" ? "" : ("?" + querys));
+        return *server + path + (querys == "" ? "" : ("?" + querys));
     }
-    void init(String server, String path = "", String querys = "")
+    void init(String *server, String path = "", String querys = "")
     {
         this->server = server;
         this->path = path;
@@ -83,6 +84,7 @@ public:
 
 // used url:
 url hulloWorld;
+url getTime;
 url absen;
 
 // fetch http request
@@ -129,13 +131,16 @@ String fetch(int verb, String path, String *Headers = NULL, String body = "")
 
     return payload;
 }
+
 DynamicJsonDocument fetch(int capacity, int verb, String path, String *Headers = NULL, String body = "")
 {
-    int payloadSize;
-    char *payload;
-    fetch(verb, path, Headers, body).toCharArray(payload, payloadSize);
+    String payload = fetch(verb, path, Headers, body);
+
+    log(F("REAL-response:"));
+    Serial.println(payload);
+
     DynamicJsonDocument res(capacity);
-    DeserializationError err = deserializeJson(res, payload, payloadSize);
+    DeserializationError err = deserializeJson(res, payload);
 
     if (err)
     {
@@ -163,38 +168,81 @@ String ReadTag()
 // lcd function
 struct
 {
-    String *currentText[2];
-    String *nextText[2];
-    unsigned long int nextUpdate;
-    bool notExecuted = false;
-    void print(String top, String bottom)
+    String currentText[2];
+    // String nextText[2];
+    // unsigned long int nextUpdate;
+    bool comingUpdate = false;
+
+    // replace all text with this one
+    void print(String top, String bottom = "", bool force = false)
     {
-        currentText[0] = &top;
-        currentText[1] = &bottom;
-        if (top == *currentText[0] && bottom == *currentText[1])
+        if (top == currentText[0] && bottom == currentText[1] && !force)
             return;
+
+        lcd_.clear();
+        currentText[0] = top;
+        currentText[1] = bottom;
+
+        // update the text
         for (int i = 0; i < LCD_ROW; i++)
         {
             lcd_.setCursor(0, i);
-            lcd_.print(*currentText[i]);
+            lcd_.print(currentText[i]);
         }
-        // update the text
-        lcd_.clear();
     }
-    void printLater(int delay_, String top = "", String bottom = "")
-    {
-        String *text[2] = {&top, &bottom};
-        nextUpdate = millis() + delay_;
-        nextText[0] = text[0];
-        nextText[1] = text[1];
-    }
-    void print(String text, int row = 0)
-    {
-        lcd_.clear();
-        lcd_.setCursor(0, 0);
-        lcd_.print(text);
-    }
+    // // print a text later
+    // void printLater(int delay_, String top = "", String bottom = "")
+    // {
+    //     nextUpdate = millis() + delay_;
+    //     nextText[0] = top;
+    //     nextText[1] = bottom;
+    // }
+
+    // // update the lcd (contineuing the print later function)
+    // void update()
+    // {
+    //     if (!(comingUpdate && nextUpdate < millis()))
+    //         return;
+    //     print(nextText[0], nextText[1]);
+    //     comingUpdate = false;
+    //     currentText[0] = nextText[0];
+    //     currentText[1] = nextText[1];
+    // }
 } lcd;
+
+// clock
+struct
+{
+    unsigned long startingTime, ofset;
+    unsigned int milis, second, minute, hour;
+    void init(unsigned int localTime)
+    {
+        ofset = millis();
+        startingTime = localTime;
+    };
+    void readTime()
+    {
+        unsigned int milisDevider = 1000,
+                     secondDevider = (60 * milisDevider),
+                     minuteDevider = (60 * secondDevider),
+                     time = startingTime + millis() - ofset;
+
+        hour = (time - time % minuteDevider) / minuteDevider;
+        minute = ((time % minuteDevider) - time % secondDevider) / secondDevider;
+        second = ((time % secondDevider) - time % milisDevider) / milisDevider;
+        milis = time % milisDevider;
+
+        // original code:
+
+        // unsigned long time;
+        // unsigned int milis, second, minute, hour;
+        // hour = (time - time % (60 * 60 * 1000)) / (60 * 60 * 1000);
+        // minute = ((time % (60 * 60 * 1000)) - time % (60 * 1000)) / (60 * 1000);
+        // second = ((time % (60 * 1000)) - time % 1000) / 1000;
+        // milis = time % 1000;
+    }
+
+} localTime;
 
 // Other
 void space(int len = 1)
@@ -202,7 +250,7 @@ void space(int len = 1)
     for (int i = 0; i < len; i++)
         Serial.println();
 }
-void beep(int freq, int duration, int blynk)
+void beep(int freq, int duration, int blynk = 1)
 {
     int delayTime = duration / (blynk * 2);
     bool on = true;
@@ -222,19 +270,29 @@ void beep(int freq, int duration, int blynk)
 
 void setup()
 {
+    Serial.begin(115200);
     server = F(SERVER_);
     wifiSSID = F(WIFI_SSID_);
     wifiPassword = F(WIFI_PASSWORD_);
+
     // initialize urls
-    hulloWorld.init(server, "hullo");
-    absen.init(server, "absen");
+    hulloWorld.init(&server, F("hullo"));
+    getTime.init(&server, F("time"));
+    absen.init(&server, F("absen"));
+
+    lcd_.begin();
+    lcd.print(F("Benyamin"), F("starting up!"));
 
     for (int i = 0; i < sizeof(outputs) / sizeof(outputs[0]); i++)
         pinMode(outputs[i], OUTPUT);
 
-    beep(1000, 500, 2);
-
-    Serial.begin(9600);
+    // starting sound
+    for (int i = 0; i < 3; i++)
+    {
+        tone(buzzer, 500 + i * 500);
+        delay(300);
+    }
+    noTone(buzzer);
 
     //   if (!mlx.begin()) {
     //     Serial.println("Error connecting to MLX sensor. Check wiring.");
@@ -244,29 +302,67 @@ void setup()
     delay(500);
 
     WiFi.begin(wifiSSID, wifiPassword);
-    log("\n\n");
-    Serial.println("connecting to " + wifiSSID);
+    log(F("\n\n"));
+    Serial.println(F("connecting to ") + wifiSSID);
 
 #define tikDelay 500
     int tik = millis() + tikDelay, manyDots = 3;
     while (WiFi.status() != WL_CONNECTED)
     {
-        if (manyDots == 3)
-            lcd.print(F("connecting to  ") + wifiSSID);
+        Serial.println(manyDots);
+        if (manyDots > 3)
+        {
+            manyDots = 0;
+            lcd.print(F("connecting to  "), wifiSSID, true);
+        }
         if (tik < millis())
         {
             manyDots++;
             lcd_.print(F("."));
+            tik = millis() + tikDelay;
         }
         if (wifi.status() == WL_WRONG_PASSWORD)
         {
+            beep(500, 3000, 3);
             lcd.print(F("wrong pasword lol"));
             log(F("wrong pasword lol"));
         }
     }
-    space();
-    Serial.print("Connected to WiFi network with IP Address: ");
+
+    lcd.print(F("connected to"), wifiSSID);
+    Serial.print(F("Connected to WiFi network with IP Address: "));
     Serial.println(WiFi.localIP());
+    space(5);
+    beep(1000, 500, 2);
+
+    delay(1000);
+
+    lcd.print(F("connecting to"), F("server..."));
+
+    log(F("server: ") + server);
+    DynamicJsonDocument response(50);
+    while (!code(responseCode, HTTP_CODE_OK))
+    {
+        log(F("fetching from ") + getTime.get());
+        response = fetch(40, GET_, getTime.get());
+
+        localTime.init(response["time"]);
+
+        log(F("response: ") + String(localTime.startingTime));
+
+        log(F("status code: ") + String(responseCode));
+        if (!code(responseCode, HTTP_CODE_OK))
+        {
+            lcd.print(F("cant connect"), F("retrying..."));
+            log(F("cant connect, retrying..."));
+            beep(600, 500, 2);
+        }
+    }
+    lcd.print(F("Connected to"), F("the server!"));
+    beep(1000, 500, 2);
+    delay(500);
+
+    space();
 
     // RFID initialization
     SPI.begin();
@@ -283,13 +379,17 @@ void setup()
                  String(Reader.PCD_GetAntennaGain()) +
                  F(". Version ."));
     Reader.PCD_DumpVersionToSerial();
-    delay(1000);
 
-    log("server: " + server);
-    log("fetching from " + hulloWorld.get());
-    log("response: " + fetch(GET_, hulloWorld.get()));
+    lcd.print(F("Benyamin ready"), F("to go!  :D"));
+    // finishing sound c:
+    for (int i = 0; i < 3; i++)
+    {
+        tone(buzzer, 1500 - i * 500);
+        delay(100);
+    }
+    noTone(buzzer);
+    delay(500);
 
-    log("status code: " + String(responseCode));
     Serial.println("==== End Setup ====");
 }
 
@@ -328,5 +428,16 @@ void loop()
             }
             beep(500, 3000, 3);
         }
+    }
+
+    // lcd cycle
+    {
+        localTime.readTime();
+
+        String hour = String(localTime.hour);
+        String minute = String(localTime.minute);
+        String time_ = (localTime.hour >= 10 ? hour : ("0" + hour)) + ":" + (localTime.minute >= 10 ? minute : ("0" + minute));
+
+        lcd.print(time_);
     }
 }
